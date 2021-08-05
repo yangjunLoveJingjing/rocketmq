@@ -62,8 +62,10 @@ public class MappedFileQueue {
         this.allocateMappedFileService = allocateMappedFileService;
     }
 
+    /**
+     *  自我检查，检查前后两个文件的 fileFromOffset差值是否等于 mappedFileSize 大小，默认为1G
+     */
     public void checkSelf() {
-
         if (!this.mappedFiles.isEmpty()) {
             Iterator<MappedFile> iterator = mappedFiles.iterator();
             MappedFile pre = null;
@@ -81,12 +83,20 @@ public class MappedFileQueue {
         }
     }
 
+    /**
+     *  返回第一个修改时间在参数时间之后的文件，如果文件都在参数之前，则返回最后一个文件
+     * @param timestamp 时间戳
+     * @return
+     */
     public MappedFile getMappedFileByTime(final long timestamp) {
         Object[] mfs = this.copyMappedFiles(0);
 
         if (null == mfs)
             return null;
 
+        /*
+         * 返回第一个修改时间大于指定时间的文件
+         */
         for (int i = 0; i < mfs.length; i++) {
             MappedFile mappedFile = (MappedFile) mfs[i];
 //            如果文件的最后修改时间大于等于参数时间
@@ -98,6 +108,12 @@ public class MappedFileQueue {
         return (MappedFile) mfs[mfs.length - 1];
     }
 //
+
+    /**
+     * 复制文件为数组
+     * @param reservedMappedFiles 最小文件个数，少于该值返回为null
+     * @return
+     */
     private Object[] copyMappedFiles(final int reservedMappedFiles) {
         Object[] mfs;
 
@@ -108,14 +124,23 @@ public class MappedFileQueue {
         mfs = this.mappedFiles.toArray();
         return mfs;
     }
-//
+
+    /**
+     * 截断脏数据文件
+     *
+     * @param offset 偏移量
+     */
     public void truncateDirtyFiles(long offset) {
+        // 保存删除的文件集合
         List<MappedFile> willRemoveFiles = new ArrayList<MappedFile>();
 
         for (MappedFile file : this.mappedFiles) {
 //            文件尾offset
             long fileTailOffset = file.getFileFromOffset() + this.mappedFileSize;
 //            文件尾offset大于处理的offset
+            // 文件尾部偏移量大于参数偏移量，存在两种情况
+            // 1、文件起始偏移量 < offset < 尾部偏移量  需要截取 [fileFromOffset,offset] 设置
+            // 2、offset < 文件起始偏移量     此时该文件全量删除
             if (fileTailOffset > offset) {
 //                处理offset大于文件开始的offset
                 if (offset >= file.getFileFromOffset()) {
@@ -127,6 +152,7 @@ public class MappedFileQueue {
                     file.setFlushedPosition((int) (offset % this.mappedFileSize));
                 } else {
 //                    文件销毁=》
+                    // 直接删除
                     file.destroy(1000);
                     willRemoveFiles.add(file);
                 }
@@ -137,6 +163,11 @@ public class MappedFileQueue {
         this.deleteExpiredFile(willRemoveFiles);
     }
 //
+
+    /**
+     * 删除超时的文件集合 只是从 mappedFiles 集合中删除掉
+     * @param files
+     */
     void deleteExpiredFile(List<MappedFile> files) {
 
         if (!files.isEmpty()) {
@@ -160,6 +191,11 @@ public class MappedFileQueue {
         }
     }
 //
+
+    /**
+     *  加载参数中 storePath 的文件
+     * @return
+     */
     public boolean load() {
 //        System.getProperty("user.home") + File.separator + "store"
 //            + File.separator + "commitlog"
@@ -170,7 +206,7 @@ public class MappedFileQueue {
             Arrays.sort(files);
             for (File file : files) {
 
-//                队列映射文件的大小不等于1G
+//                队列映射文件的大小不等于1G  当遇到第一个文件大小不是1G时，停止加载
                 if (file.length() != this.mappedFileSize) {
                     log.warn(file + "\t" + file.length()
                         + " length not matched message store config value, ignore it");
@@ -179,8 +215,13 @@ public class MappedFileQueue {
 
                 try {
 //                    创建映射文件=》
+                    /**
+                     *  创建映射文件 MappedFile 对象
+                     */
                     MappedFile mappedFile = new MappedFile(file.getPath(), mappedFileSize);
 
+                    // 设置三个指针 writePosition flushedPosition committedPosition 为文件大小
+                    // 添加映射文件到 mappedFiles 集合中
                     mappedFile.setWrotePosition(this.mappedFileSize);
                     mappedFile.setFlushedPosition(this.mappedFileSize);
                     mappedFile.setCommittedPosition(this.mappedFileSize);
@@ -196,6 +237,11 @@ public class MappedFileQueue {
         return true;
     }
 //
+
+    /**
+     *  判断刷盘落后的偏移量(最新的writePosition - flushedPosition)
+     * @return
+     */
     public long howMuchFallBehind() {
         if (this.mappedFiles.isEmpty())
             return 0;
@@ -211,21 +257,36 @@ public class MappedFileQueue {
         return 0;
     }
 //
+
+    /**
+     *  获取最新的MappedFile文件
+     * @param startOffset 起始偏移量
+     * @param needCreate 是否创建映射文件
+     * @return
+     */
     public MappedFile getLastMappedFile(final long startOffset, boolean needCreate) {
         long createOffset = -1;
 //        获取映射文件队列中最后一个映射文件
         MappedFile mappedFileLast = getLastMappedFile();
-
         if (mappedFileLast == null) {
+            // 不存在映射文件时，设置 createOffset = startOffSet - (startOffSet % this.mappedFileSize )
+            // 设置 createOffset 的目的用于创建新文件时，设置文件的 fileFromOffset
             createOffset = startOffset - (startOffset % this.mappedFileSize);
         }
 
         if (mappedFileLast != null && mappedFileLast.isFull()) {
 //            创建的offset=最后映射文件的开始offset+映射文件的大小
+            // 最后一个文件已满，需要创建新文件时，设置 createOffset = 最后一个文件的 fileFromOffset + 文件大小
+            // 设置 createOffset 的目的用于创建新文件时，设置文件的 fileFromOffset
             createOffset = mappedFileLast.getFileFromOffset() + this.mappedFileSize;
         }
 
 //        创建文件的offset不是-1且需要创建映射文件
+        /**
+         *  需要创建新文件的条件
+         *  1、createOffset != -1 说明文件不存在或者文件已满
+         *  2、needCreate 创建标志为 true
+         */
         if (createOffset != -1 && needCreate) {
 //            下个文件存储路径 System.getProperty("user.home") + File.separator + "store"
 //            + File.separator + "commitlog"，根据offset创建文件名
@@ -235,6 +296,11 @@ public class MappedFileQueue {
                 + UtilAll.offset2FileName(createOffset + this.mappedFileSize);
             MappedFile mappedFile = null;
 
+            /**
+             *  此处有两种方式创建 MappedFile文件
+             *  1、使用 allocateMappedFileService.putRequestAndReturnMappedFile() 获取 mappedFile
+             *  2、直接 new MappedFile(filePath,this.mappedFileSize)
+             */
             if (this.allocateMappedFileService != null) {
 //                处理请求返回映射文件=》
                 mappedFile = this.allocateMappedFileService.putRequestAndReturnMappedFile(nextFilePath,
@@ -248,6 +314,7 @@ public class MappedFileQueue {
                 }
             }
 
+            // 创建完成之后，添加到 mappedFile 队列中，如果是首次添加，设置 mappedFile 标识为首次添加
             if (mappedFile != null) {
                 if (this.mappedFiles.isEmpty()) {
                     mappedFile.setFirstCreateInQueue(true);

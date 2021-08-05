@@ -49,20 +49,35 @@ public class AllocateMappedFileService extends ServiceThread {
     }
 //
     public MappedFile putRequestAndReturnMappedFile(String nextFilePath, String nextNextFilePath, int fileSize) {
+        // 设置为2，原因是后续会添加两个req请求
         int canSubmitRequests = 2;
-//        是否瞬间持久化
+        /**
+         *  判断是否瞬间持久化
+         *  1、transientStorePoolEnable = true 表示开启
+         *  2、刷盘方式 FlushDiskType 为 ASYNC_FLUSH  异步刷盘时
+         *  3、brokerRole 不能是 slave
+         */
         if (this.messageStore.getMessageStoreConfig().isTransientStorePoolEnable()) {
 //            如果broker是master，buffer不够用瞬间失败
+            /**
+             *  如果设置了当内存不够时快速失败， 并且当前不是 slave 时，计算可提交的信息数据 canSubmitRequests 表示还可以提交多少信息
+             *  计算方式为 剩余空间 - 当前队列中的请求数
+             */
             if (this.messageStore.getMessageStoreConfig().isFastFailIfNoBufferInStorePool()
                 && BrokerRole.SLAVE != this.messageStore.getMessageStoreConfig().getBrokerRole()) { //if broker is slave, don't fast fail even no buffer in pool
                 canSubmitRequests = this.messageStore.getTransientStorePool().remainBufferNumbs() - this.requestQueue.size();
             }
         }
 
+        // 创建申请内存的请求
         AllocateRequest nextReq = new AllocateRequest(nextFilePath, fileSize);
 //        缓存存储请求
         boolean nextPutOK = this.requestTable.putIfAbsent(nextFilePath, nextReq) == null;
-
+        /**
+         *  nextPutOK = true 说明之前不存在，添加成功
+         *  canSubmitRequests <=0 说明不存在可用空间，需要删除已经添加到容器中的请求
+         *  否则，添加 nextReq 请求到 requestQueue 队列中，并执行 canSubmitRequests--
+         */
         if (nextPutOK) {
             if (canSubmitRequests <= 0) {
                 log.warn("[NOTIFYME]TransientStorePool is not enough, so create mapped file error, " +
@@ -78,6 +93,9 @@ public class AllocateMappedFileService extends ServiceThread {
             canSubmitRequests--;
         }
 
+        /**
+         *  执行到此，说明该请求 nextReq已经存在，需要添加下下个请求 nextNextReq
+         */
         AllocateRequest nextNextReq = new AllocateRequest(nextNextFilePath, fileSize);
 //        缓存下下个请求
         boolean nextNextPutOK = this.requestTable.putIfAbsent(nextNextFilePath, nextNextReq) == null;
@@ -100,6 +118,7 @@ public class AllocateMappedFileService extends ServiceThread {
             return null;
         }
 
+
         AllocateRequest result = this.requestTable.get(nextFilePath);
         try {
             if (result != null) {
@@ -109,6 +128,7 @@ public class AllocateMappedFileService extends ServiceThread {
                     log.warn("create mmap timeout " + result.getFilePath() + " " + result.getFileSize());
                     return null;
                 } else {
+                    // 如果成功的话，从 requestTable 中删除，并返回 MappedFile
                     this.requestTable.remove(nextFilePath);
                     return result.getMappedFile();
                 }
@@ -158,12 +178,23 @@ public class AllocateMappedFileService extends ServiceThread {
     /**
      * Only interrupted by the external thread, will return false
      */
+
+    /**
+     *  处理申请存储空间的请求
+     * @return
+     */
     private boolean mmapOperation() {
         boolean isSuccess = false;
         AllocateRequest req = null;
         try {
+            /**
+             *  1、优先级阻塞队列获取 requestQueue，如果为空会阻塞住
+             *  2、根据 req.filePath 从 requestTable 获取请求的信息 AllocateRequest
+             */
             req = this.requestQueue.take();
             AllocateRequest expectedRequest = this.requestTable.get(req.getFilePath());
+
+            // 如果两个队列中获取的不一致，说明请求超时了或者取消了
             if (null == expectedRequest) {
                 log.warn("this mmap request expired, maybe cause timeout " + req.getFilePath() + " "
                     + req.getFileSize());
@@ -175,6 +206,9 @@ public class AllocateMappedFileService extends ServiceThread {
                 return true;
             }
 
+            /**
+             *  执行创建映射文件工作
+             */
             if (req.getMappedFile() == null) {
                 long beginTime = System.currentTimeMillis();
 

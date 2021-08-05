@@ -40,6 +40,15 @@ public abstract class ReferenceResource {
         return this.available;
     }
 //
+
+    /**
+     *  关闭文件
+     *  1、如果首次执行，先设置 available = false,标志不可用，设置首次更新时间 firstShutdownTimestamp = 当前时间
+     *  2、如果非首次执行，需要判断当前时间和首次关闭时间的差值，如果在指定时间内，暂时不处理，否则修改引用值为 （1000-当前引用数）取反
+     *  3、最后调用 release()
+     * @param intervalForcibly 时间间隔，判断当前时间和首次关闭时间的间隔
+     *                         如果时间差在 intervalForcibly 内，不执行释放逻辑，否则，修改引用值为 （1000-当前引用数）取反
+     */
     public void shutdown(final long intervalForcibly) {
         if (this.available) {
             this.available = false;
@@ -53,6 +62,12 @@ public abstract class ReferenceResource {
         }
     }
 //
+
+    /**
+     *  释放占用空间
+     *  1、refCount 原子性递减
+     *  2、如果引用数小于等于0，执行 cleanup() 工作  cleanup() 在 具体子类中
+     */
     public void release() {
         long value = this.refCount.decrementAndGet();
         if (value > 0)

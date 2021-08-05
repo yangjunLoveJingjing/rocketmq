@@ -158,16 +158,30 @@ public class MappedFile extends ReferenceResource {
         this.transientStorePool = transientStorePool;
     }
 //
+
+    /**
+     *  初始化映射文件
+     *  主要做了以下功能
+     *  1、设置文件名，文件大小，文件起始offSet
+     *  2、判断文件目录存在
+     *  3、创建 FileChannel 并创建内存映射 MappedByteBuffer
+     *  4、增加占用虚拟内存计数 增加MappedFile计数
+     * @param fileName 实际文件名称
+     * @param fileSize 文件大小
+     * @throws IOException
+     */
     private void init(final String fileName, final int fileSize) throws IOException {
         this.fileName = fileName;
         this.fileSize = fileSize;
         this.file = new File(fileName);
+        // 因为文件是以对应的 fileFromOffset 来命名的，所以可以直接根据文件名称获取该文件对应的 fileFromOffset
         this.fileFromOffset = Long.parseLong(this.file.getName());
         boolean ok = false;
-
+        // 判断文件父级目录存在
         ensureDirOK(this.file.getParent());
 
         try {
+            // 创建 fileChannel
             this.fileChannel = new RandomAccessFile(this.file, "rw").getChannel();
             this.mappedByteBuffer = this.fileChannel.map(MapMode.READ_WRITE, 0, fileSize);
             TOTAL_MAPPED_VIRTUAL_MEMORY.addAndGet(fileSize);
@@ -434,6 +448,16 @@ public class MappedFile extends ReferenceResource {
 
     @Override
     public boolean cleanup(final long currentRef) {
+        /*
+         * 要清理占用空间需要满足以下条件
+         * 1、available 必须为false
+         * 2、cleanupOver 为 false,因为为true说明已经清理完成，无需再次清理
+         *
+         * 执行清理回收包含以下步骤
+         * 1、清除映射缓冲区
+         * 2、释放文件占用的虚拟内存
+         * 3、减少文件个数
+         */
         if (this.isAvailable()) {
             log.error("this file[REF:" + currentRef + "] " + this.fileName
                 + " have not shutdown, stop unmapping.");
@@ -460,6 +484,9 @@ public class MappedFile extends ReferenceResource {
 //        =》
         this.shutdown(intervalForcibly);
 
+        /*
+         *  isCleanupOver 清理成功的条件 1、文件引用小于等于0 2、cleanupOver 清理标志为true
+         */
         if (this.isCleanupOver()) {
             try {
 //                关闭文件channel
@@ -468,6 +495,7 @@ public class MappedFile extends ReferenceResource {
 
                 long beginTime = System.currentTimeMillis();
 //                删除文件
+                // 执行物理删除
                 boolean result = this.file.delete();
                 log.info("delete file[REF:" + this.getRefCount() + "] " + this.fileName
                     + (result ? " OK, " : " Failed, ") + "W:" + this.getWrotePosition() + " M:"
